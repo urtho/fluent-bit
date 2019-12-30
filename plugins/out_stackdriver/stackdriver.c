@@ -394,8 +394,7 @@ static int validate_severity_level(severity_t * s,
 }
 
 static int get_msgpack_obj(msgpack_object * subobj, const msgpack_object * o,
-                           const flb_sds_t key, const int key_size,
-                           msgpack_object_type type)
+                           const flb_sds_t key, msgpack_object_type type)
 {
     int i = 0;
     msgpack_object_kv * p = NULL;
@@ -422,12 +421,90 @@ static int get_severity_level(severity_t * s, const msgpack_object * o,
                               const flb_sds_t key)
 {
     msgpack_object tmp;
-    if (get_msgpack_obj(&tmp, o, key, flb_sds_len(key), MSGPACK_OBJECT_STR) == 0
+    if (get_msgpack_obj(&tmp, o, key, MSGPACK_OBJECT_STR) == 0
         && validate_severity_level(s, tmp.via.str.ptr, tmp.via.str.size) == 0) {
         return 0;
     }
     *s = 0;
     return -1;
+}
+
+/*
+ *  Add 3 additionall k8s_container keys
+ *  
+ *  "severity": "...",
+ *  "resource": {
+ *     "type": "k8s_container",
+ *     "labels": &k8s_container,
+ *  },
+ *  "labels": &k8s_container.labels // with "k8s-pod/" prefix
+ *   
+ */
+static void filter_k8s_resources(msgpack_packer *mp_pck, msgpack_object *obj, 
+                                 struct flb_stackdriver *ctx, msgpack_object *k8s_map) 
+{
+    int i;
+    int objcnt;
+    int has_labels = 0;
+    severity_t severity;
+    msgpack_object_kv * p = NULL;
+    msgpack_object labels_map;
+
+    if (get_msgpack_obj(&labels_map, k8s_map, ctx->k8s_labels_key, MSGPACK_OBJECT_MAP) == 0) {
+        has_labels = 1;
+    }
+
+    msgpack_pack_map(mp_pck, 3 + 2 + has_labels);
+    
+    /* Get k8s severity, fallback to DEFAULT */
+    get_severity_level(&severity, obj, ctx->k8s_severity_key);
+    msgpack_pack_str(mp_pck, 8);
+    msgpack_pack_str_body(mp_pck, "severity", 8);
+    msgpack_pack_int(mp_pck, severity);
+
+    /* Add individual resource KVs */   
+    msgpack_pack_str(mp_pck,8);
+    msgpack_pack_str_body(mp_pck, "resource",8);
+    msgpack_pack_map(mp_pck, 2);
+    
+    msgpack_pack_str(mp_pck,4);
+    msgpack_pack_str_body(mp_pck, "type",4);
+    msgpack_pack_str(mp_pck,13);
+    msgpack_pack_str_body(mp_pck, "k8s_container",13);
+
+    /* Copy k8s_container entries as resource labels (skipping "lables" map) */
+    msgpack_pack_str(mp_pck,6);
+    msgpack_pack_str_body(mp_pck, "labels",6);
+    for (objcnt= 0, i = 0; i < k8s_map->via.map.size; i++) {
+        p = &k8s_map->via.map.ptr[i];
+        if (p->val.type != MSGPACK_OBJECT_MAP 
+            || flb_sds_cmp(ctx->k8s_labels_key, p->key.via.str.ptr, p->key.via.str.size) != 0) {
+            objcnt++;
+        }                
+    }    
+    msgpack_pack_map(mp_pck, objcnt); 
+    for (i = 0; i < k8s_map->via.map.size; i++) {
+        p = &k8s_map->via.map.ptr[i];
+        if (p->val.type != MSGPACK_OBJECT_MAP 
+            || flb_sds_cmp(ctx->k8s_labels_key, p->key.via.str.ptr, p->key.via.str.size) != 0) {
+            msgpack_pack_object(mp_pck, p->key);
+            msgpack_pack_object(mp_pck, p->val);
+        }                
+    }
+       
+    /* Copy k8s labels with "k8s-pod/" prefix */
+    if (has_labels) {
+        msgpack_pack_str(mp_pck,6);
+        msgpack_pack_str_body(mp_pck, "labels",6);
+        msgpack_pack_map(mp_pck, labels_map.via.map.size);
+        for (i = 0; i < labels_map.via.map.size; i++) {
+            p = &labels_map.via.map.ptr[i];
+            msgpack_pack_str(mp_pck, 8 + p->key.via.str.size);
+            msgpack_pack_str_body(mp_pck, "k8s-pod/",8);
+            msgpack_pack_str_body(mp_pck, p->key.via.str.ptr, p->key.via.str.size);
+            msgpack_pack_object(mp_pck, p->val);            
+        }
+    }
 }
 
 static int stackdriver_format(const void *data, size_t bytes,
@@ -445,10 +522,12 @@ static int stackdriver_format(const void *data, size_t bytes,
     struct flb_time tms;
     severity_t severity;
     msgpack_object *obj;
+    msgpack_object k8s_map;
+
     msgpack_unpacked result;
     msgpack_sbuffer mp_sbuf;
     msgpack_packer mp_pck;
-    flb_sds_t out_buf;
+    flb_sds_t out_buf;    
 
     /* Count number of records */
     msgpack_unpacked_init(&result);
@@ -536,16 +615,22 @@ static int stackdriver_format(const void *data, size_t bytes,
          *  "timestamp": "..."
          * }
          */
-        if (ctx->severity_key
-            && get_severity_level(&severity, obj, ctx->severity_key) == 0) {
-            /* additional field for severity */
-            msgpack_pack_map(&mp_pck, 4);
-            msgpack_pack_str(&mp_pck, 8);
-            msgpack_pack_str_body(&mp_pck, "severity", 8);
-            msgpack_pack_int(&mp_pck, severity);
-        }
+        if (ctx->k8s_container_map 
+            && get_msgpack_obj(&k8s_map, obj, ctx->k8s_container_map, MSGPACK_OBJECT_MAP) == 0) {
+            filter_k8s_resources(&mp_pck, obj, ctx, &k8s_map);            
+        } 
         else {
-            msgpack_pack_map(&mp_pck, 3);
+            if (ctx->severity_key
+                && get_severity_level(&severity, obj, ctx->severity_key) == 0) {
+                /* additional field for severity */
+                msgpack_pack_map(&mp_pck, 4);
+                msgpack_pack_str(&mp_pck, 8);
+                msgpack_pack_str_body(&mp_pck, "severity", 8);
+                msgpack_pack_int(&mp_pck, severity);
+            }
+            else {
+                msgpack_pack_map(&mp_pck, 3);
+            }
         }
 
         /* jsonPayload */
