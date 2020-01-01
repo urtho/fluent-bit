@@ -430,7 +430,7 @@ static int get_severity_level(severity_t * s, const msgpack_object * o,
 }
 
 /*
- *  Add 3 additionall k8s_container keys
+ *  Add 3 additionall k8s_container keys by filtering kubernetes plugin metadata
  *  
  *  "severity": "...",
  *  "resource": {
@@ -455,7 +455,7 @@ static void filter_k8s_resources(msgpack_packer *mp_pck, msgpack_object *obj,
     }
 
     msgpack_pack_map(mp_pck, 3 + 2 + has_labels);
-    
+
     /* Get k8s severity, fallback to DEFAULT */
     get_severity_level(&severity, obj, ctx->k8s_severity_key);
     msgpack_pack_str(mp_pck, 8);
@@ -606,15 +606,7 @@ static int stackdriver_format(const void *data, size_t bytes,
         /* Get timestamp */
         flb_time_pop_from_msgpack(&tms, &result, &obj);
 
-        /*
-         * Pack entry
-         *
-         * {
-         *  "logName": "...",
-         *  "jsonPayload": {...},
-         *  "timestamp": "..."
-         * }
-         */
+
         if (ctx->k8s_container_map 
             && get_msgpack_obj(&k8s_map, obj, ctx->k8s_container_map, MSGPACK_OBJECT_MAP) == 0) {
             filter_k8s_resources(&mp_pck, obj, ctx, &k8s_map);            
@@ -632,6 +624,15 @@ static int stackdriver_format(const void *data, size_t bytes,
                 msgpack_pack_map(&mp_pck, 3);
             }
         }
+        /*
+         * Pack entry
+         *
+         * {
+         *  "logName": "...",
+         *  "jsonPayload": {...},
+         *  "timestamp": "..."
+         * }
+         */            
 
         /* jsonPayload */
         msgpack_pack_str(&mp_pck, 11);
@@ -672,6 +673,7 @@ static int stackdriver_format(const void *data, size_t bytes,
         msgpack_unpacked_destroy(&result);
         return -1;
     }
+    flb_error("JSON: %d %.*s",flb_sds_len(out_buf),flb_sds_len(out_buf),out_buf);
 
     *out_data = out_buf;
     *out_size = flb_sds_len(out_buf);
@@ -733,7 +735,7 @@ static void cb_stackdriver_flush(const void *data, size_t bytes,
 
     /* Compose HTTP Client request */
     c = flb_http_client(u_conn, FLB_HTTP_POST, FLB_STD_WRITE_URI,
-                        payload_buf, payload_size, NULL, 0, NULL, 0);
+                        payload_buf, payload_size, u_conn->u->tcp_host, u_conn->u->tcp_port, NULL, 0);
 
     flb_http_buffer_size(c, 4192);
 

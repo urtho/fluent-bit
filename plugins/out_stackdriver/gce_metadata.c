@@ -50,12 +50,12 @@ static int fetch_metadata(struct flb_upstream *ctx, char *uri,
 
     /* Compose HTTP Client request */
     c = flb_http_client(metadata_conn, FLB_HTTP_GET, uri,
-                        "", 0, NULL, 0, NULL, 0);
+                        "", 0, metadata_conn->u->tcp_host, metadata_conn->u->tcp_port, NULL, 0);
 
     flb_http_buffer_size(c, 4096);
 
     flb_http_add_header(c, "User-Agent", 10, "Fluent-Bit", 10);
-    flb_http_add_header(c, "Content-Type", 12, "application/text", 16);
+    flb_http_add_header(c, "Content-Type", 12, "application/json", 16);
     flb_http_add_header(c, "Metadata-Flavor", 15, "Google", 6);
 
     /* Send HTTP request */
