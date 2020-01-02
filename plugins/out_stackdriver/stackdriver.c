@@ -322,11 +322,10 @@ static int cb_stackdriver_init(struct flb_output_instance *ins,
     if (!token) {
         flb_warn("[out_stackdriver] token retrieval failed");
     }
-    if (ctx->metadata_server_auth) {
-      gce_metadata_read_project_id(ctx);
-      gce_metadata_read_zone(ctx);
-      gce_metadata_read_instance_id(ctx);
-    }
+    if (ctx->project_id == NULL)
+        gce_metadata_read_project_id(ctx);
+    gce_metadata_read_zone(ctx);
+    gce_metadata_read_instance_id(ctx);
     return 0;
 }
 
@@ -459,72 +458,101 @@ static void filter_k8s_resources(msgpack_packer *mp_pck, msgpack_object *obj,
     msgpack_object labels_map;
 
     if (get_msgpack_obj(&labels_map, &k8s_labels_idx, k8s_map, ctx->k8s_labels_key, MSGPACK_OBJECT_MAP) == 0) {
-        has_labels = 1;
+        has_labels = labels_map.via.map.size > 0 ? 1 : 0;
     }
 
-    msgpack_pack_map(mp_pck, 3 + 2 + has_labels);
+    msgpack_pack_map(mp_pck, 3 + 3);
 
     /* 1: Get k8s severity, fallback to DEFAULT */
     get_severity_level(&severity, obj, ctx->k8s_severity_key);
+    /* root */
     msgpack_pack_str(mp_pck, 8);
     msgpack_pack_str_body(mp_pck, "severity", 8);
+    /* severity */
     msgpack_pack_int(mp_pck, severity);
 
-    /* 2: Add individual resource KVs */
-    msgpack_pack_str(mp_pck,8);
-    msgpack_pack_str_body(mp_pck, "resource",8);
-
-    msgpack_pack_map(mp_pck, 1 + has_labels);
-
-    msgpack_pack_str(mp_pck,4);
-    msgpack_pack_str_body(mp_pck, "type",4);
-
-    msgpack_pack_str(mp_pck,13);
-    msgpack_pack_str_body(mp_pck, "k8s_container",13);
-
-    if (has_labels) {
-        msgpack_pack_str(mp_pck,6);
-        msgpack_pack_str_body(mp_pck, "labels",6);
-
-        if (get_msgpack_obj(&labels_map, NULL, NULL, ctx->k8s_project_id_key, MSGPACK_OBJECT_STR) == 0) {
-            has_project_id = 1;
-        }
-
-        msgpack_pack_map(mp_pck, k8s_map->via.map.size - 1 + 1 + (1 - has_project_id));
-
-        /* Add location <= ctx->zone */
-        msgpack_pack_str(mp_pck, 8);
-        msgpack_pack_str_body(mp_pck, "location", 8);
-        msgpack_pack_str(mp_pck, flb_sds_len(ctx->zone));
-        msgpack_pack_str_body(mp_pck, ctx->zone, flb_sds_len(ctx->zone));
-
-        /* Ensure project_id key exists. Add if missing. */
-        if (!has_project_id) {
-            msgpack_pack_str(mp_pck, 10);
-            msgpack_pack_str_body(mp_pck, "project_id", 10);
-            msgpack_pack_str(mp_pck, flb_sds_len(ctx->project_id));
-            msgpack_pack_str_body(mp_pck, ctx->project_id, flb_sds_len(ctx->project_id));
-        }
-
-        /* Copy k8s_container entries as resource labels (skipping "lables" map) */
-        for (i = 0; i < k8s_map->via.map.size; i++) {
-            p = &k8s_map->via.map.ptr[i];
-            if (i != k8s_labels_idx) {
-                msgpack_pack_object(mp_pck, p->key);
-                msgpack_pack_object(mp_pck, p->val);
-            }
-        }
-
-        /* 3: Create root "labels" map. Copy k8s labels with "k8s-pod/" prefix */
-        msgpack_pack_str(mp_pck,6);
-        msgpack_pack_str_body(mp_pck, "labels",6);
+    /* 2: Create root "labels" map. Copy k8s labels with "k8s-pod/" prefix */
+    /* root */
+    msgpack_pack_str(mp_pck,6);
+    msgpack_pack_str_body(mp_pck, "labels",6);
+    if (!has_labels) {
+        msgpack_pack_nil(mp_pck);
+    } else
+    {
         msgpack_pack_map(mp_pck, labels_map.via.map.size);
         for (i = 0; i < labels_map.via.map.size; i++) {
             p = &labels_map.via.map.ptr[i];
+            /* labels */
             msgpack_pack_str(mp_pck, 8 + p->key.via.str.size);
             msgpack_pack_str_body(mp_pck, "k8s-pod/",8);
             msgpack_pack_str_body(mp_pck, p->key.via.str.ptr, p->key.via.str.size);
             msgpack_pack_object(mp_pck, p->val);
+        }
+    }
+
+    /* 3: Add individual resource KVs */
+    /* root */
+    msgpack_pack_str(mp_pck,8);
+    msgpack_pack_str_body(mp_pck, "resource",8);
+
+    /* resource */
+    msgpack_pack_map(mp_pck, 2);
+
+    /* resource */
+    msgpack_pack_str(mp_pck,4);
+    msgpack_pack_str_body(mp_pck, "type",4);
+
+    /* resource.type */
+    msgpack_pack_str(mp_pck,13);
+    msgpack_pack_str_body(mp_pck, "k8s_container",13);
+
+    /* resource */
+    msgpack_pack_str(mp_pck,6);
+    msgpack_pack_str_body(mp_pck, "labels",6);
+
+    if (!has_labels) {
+        msgpack_pack_nil(mp_pck);
+    } else
+    {
+        if (get_msgpack_obj(&labels_map, NULL, NULL, ctx->k8s_project_id_key, MSGPACK_OBJECT_STR) == 0) {
+            has_project_id = 1;
+        }
+
+        /* resource.labels */
+        msgpack_pack_map(mp_pck, k8s_map->via.map.size
+            - 1 /*labels*/
+            + ctx->zone ? 1 : 0 /*location*/
+            //+ (1 - has_project_id) /*project_id*/
+        );
+
+        if (ctx->zone) {
+            /* Add location <= ctx->zone */
+            msgpack_pack_str(mp_pck, 8);
+            msgpack_pack_str_body(mp_pck, "location", 8);
+            /* resource.labels.location */
+            msgpack_pack_str(mp_pck, flb_sds_len(ctx->zone));
+            msgpack_pack_str_body(mp_pck, ctx->zone, flb_sds_len(ctx->zone));
+        }
+
+        /* Ensure project_id key exists. Add if missing. */
+        if (0 && !has_project_id) {
+            /* resource.labels */
+            msgpack_pack_str(mp_pck, 10);
+            msgpack_pack_str_body(mp_pck, "project_id", 10);
+            /* resource.labels.project_id */
+            msgpack_pack_str(mp_pck, flb_sds_len(ctx->project_id));
+            msgpack_pack_str_body(mp_pck, ctx->project_id, flb_sds_len(ctx->project_id));
+        }
+
+        /* Copy k8s_container entries as resource labels (skipping "labels" map) */
+
+        for (i = 0; i < k8s_map->via.map.size; i++) {
+            p = &k8s_map->via.map.ptr[i];
+            if (i != k8s_labels_idx) {
+            /* resource.labels */
+                msgpack_pack_object(mp_pck, p->key);
+                msgpack_pack_object(mp_pck, p->val);
+            }
         }
     }
 }
@@ -536,10 +564,8 @@ static int stackdriver_format(const void *data, size_t bytes,
 {
     int i;
     int len;
-    int has_k8s_log = 0;
     int array_size = 0;
     int k8s_map_idx = -1;
-    int k8s_log_idx = -1;
     size_t s;
     size_t off = 0;
     char path[PATH_MAX];
@@ -634,9 +660,6 @@ static int stackdriver_format(const void *data, size_t bytes,
         if (ctx->k8s_container_map
             && get_msgpack_obj(&k8s_map, &k8s_map_idx, obj, ctx->k8s_container_map, MSGPACK_OBJECT_MAP) == 0) {
             filter_k8s_resources(&mp_pck, obj, ctx, &k8s_map);
-            if (get_msgpack_obj(&k8s_map, &k8s_log_idx, obj, ctx->k8s_log_key, -1) == 0) {
-                has_k8s_log = 1;
-            }
         }
         else {
             if (ctx->severity_key
@@ -666,9 +689,9 @@ static int stackdriver_format(const void *data, size_t bytes,
         msgpack_pack_str_body(&mp_pck, "jsonPayload", 11);
         /* Copy all but $k8s_container & log keys */
         if (k8s_map_idx >= 0) {
-            msgpack_pack_map(&mp_pck, obj->via.map.size - 1 - has_k8s_log);
+            msgpack_pack_map(&mp_pck, obj->via.map.size - 1);
             for (i = 0; i < obj->via.map.size; i++) {
-                if (i != k8s_map_idx && i != k8s_log_idx) {
+                if (i != k8s_map_idx ) {
                     msgpack_pack_object(&mp_pck, obj->via.map.ptr[i].key);
                     msgpack_pack_object(&mp_pck, obj->via.map.ptr[i].val);
                 }
@@ -774,7 +797,7 @@ static void cb_stackdriver_flush(const void *data, size_t bytes,
 
     /* Compose HTTP Client request */
     c = flb_http_client(u_conn, FLB_HTTP_POST, FLB_STD_WRITE_URI,
-                        payload_buf, payload_size, u_conn->u->tcp_host, u_conn->u->tcp_port, NULL, 0);
+                        payload_buf, payload_size, ctx->u->tcp_host, ctx->u->tcp_port, NULL, 0);
 
     flb_http_buffer_size(c, 4192);
 

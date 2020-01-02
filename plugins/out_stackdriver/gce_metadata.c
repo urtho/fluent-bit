@@ -50,7 +50,7 @@ static int fetch_metadata(struct flb_upstream *ctx, char *uri,
 
     /* Compose HTTP Client request */
     c = flb_http_client(metadata_conn, FLB_HTTP_GET, uri,
-                        "", 0, metadata_conn->u->tcp_host, metadata_conn->u->tcp_port, NULL, 0);
+                        "", 0, NULL, 0, NULL, 0);
 
     flb_http_buffer_size(c, 4096);
 
@@ -160,6 +160,7 @@ int gce_metadata_read_zone(struct flb_stackdriver *ctx)
         i++;
         j++;
     }
+    flb_debug("[gce_metadata] zone=%s", zone);
     ctx->zone = flb_sds_create(zone);
     flb_sds_destroy(zone);
     flb_sds_destroy(payload);
@@ -178,6 +179,7 @@ int gce_metadata_read_project_id(struct flb_stackdriver *ctx)
         flb_sds_destroy(payload);
         return -1;
     }
+    flb_debug("[gce_metadata] project_id=%s", payload);
     ctx->project_id = flb_sds_create(payload);
     flb_sds_destroy(payload);
     return 0;
@@ -194,6 +196,7 @@ int gce_metadata_read_instance_id(struct flb_stackdriver *ctx)
         flb_sds_destroy(payload);
         return -1;
     }
+    flb_debug("[gce_metadata] instance_id=%s", payload);
     ctx->instance_id = flb_sds_create(payload);
     flb_sds_destroy(payload);
     return 0;
