@@ -289,6 +289,7 @@ struct flb_stackdriver *flb_stackdriver_conf_create(struct flb_output_instance *
         ctx->k8s_container_map = flb_sds_create(tmp);
         ctx->k8s_severity_key = flb_sds_create("severity");
         ctx->k8s_labels_key = flb_sds_create("labels");
+        ctx->k8s_project_id_key = flb_sds_create("project_id");
     }
 
     return ctx;
@@ -314,6 +315,7 @@ int flb_stackdriver_conf_destroy(struct flb_stackdriver *ctx)
     flb_sds_destroy(ctx->k8s_container_map);
     flb_sds_destroy(ctx->k8s_severity_key);
     flb_sds_destroy(ctx->k8s_labels_key);
+    flb_sds_destroy(ctx->k8s_project_id_key);
 
     if (ctx->o) {
         flb_oauth2_destroy(ctx->o);

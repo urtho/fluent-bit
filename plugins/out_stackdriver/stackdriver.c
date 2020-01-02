@@ -393,13 +393,15 @@ static int validate_severity_level(severity_t * s,
     return -1;
 }
 
-static int get_msgpack_obj(msgpack_object * subobj, const msgpack_object * o,
-                           const flb_sds_t key, msgpack_object_type type)
+static int get_msgpack_obj(msgpack_object * subobj, int *idx, const msgpack_object * o,
+                           const flb_sds_t key, const msgpack_object_type type)
 {
     int i = 0;
     msgpack_object_kv * p = NULL;
+    if (idx)
+        *idx = -1;
 
-    if (o == NULL || subobj == NULL) {
+    if (o == NULL) {
         return -1;
     }
 
@@ -410,7 +412,10 @@ static int get_msgpack_obj(msgpack_object * subobj, const msgpack_object * o,
         }
 
         if (flb_sds_cmp(key, p->key.via.str.ptr, p->key.via.str.size) == 0) {
-            *subobj = p->val;
+            if (subobj)
+                *subobj = p->val;
+            if (idx)
+                *idx = i;
             return 0;
         }
     }
@@ -421,7 +426,7 @@ static int get_severity_level(severity_t * s, const msgpack_object * o,
                               const flb_sds_t key)
 {
     msgpack_object tmp;
-    if (get_msgpack_obj(&tmp, o, key, MSGPACK_OBJECT_STR) == 0
+    if (get_msgpack_obj(&tmp, NULL, o, key, MSGPACK_OBJECT_STR) == 0
         && validate_severity_level(s, tmp.via.str.ptr, tmp.via.str.size) == 0) {
         return 0;
     }
@@ -431,26 +436,29 @@ static int get_severity_level(severity_t * s, const msgpack_object * o,
 
 /*
  *  Add 3 additionall k8s_container keys by filtering kubernetes plugin metadata
- *  
+ *
  *  "severity": "...",
  *  "resource": {
  *     "type": "k8s_container",
  *     "labels": &k8s_container,
+ *     "location": ctx->zone,
+ *     "project_id": ctx->project_id,
  *  },
- *  "labels": &k8s_container.labels // with "k8s-pod/" prefix
- *   
+ *  "labels": &k8s_container.labels with "k8s-pod/" prefix
+ *
  */
-static void filter_k8s_resources(msgpack_packer *mp_pck, msgpack_object *obj, 
-                                 struct flb_stackdriver *ctx, msgpack_object *k8s_map) 
+static void filter_k8s_resources(msgpack_packer *mp_pck, msgpack_object *obj,
+                                 struct flb_stackdriver *ctx, msgpack_object *k8s_map)
 {
     int i;
-    int objcnt;
     int has_labels = 0;
+    int k8s_labels_idx = -1;
+    int has_project_id = 0;
     severity_t severity;
     msgpack_object_kv * p = NULL;
     msgpack_object labels_map;
 
-    if (get_msgpack_obj(&labels_map, k8s_map, ctx->k8s_labels_key, MSGPACK_OBJECT_MAP) == 0) {
+    if (get_msgpack_obj(&labels_map, &k8s_labels_idx, k8s_map, ctx->k8s_labels_key, MSGPACK_OBJECT_MAP) == 0) {
         has_labels = 1;
     }
 
@@ -462,38 +470,50 @@ static void filter_k8s_resources(msgpack_packer *mp_pck, msgpack_object *obj,
     msgpack_pack_str_body(mp_pck, "severity", 8);
     msgpack_pack_int(mp_pck, severity);
 
-    /* Add individual resource KVs */   
+    /* Add individual resource KVs */
     msgpack_pack_str(mp_pck,8);
     msgpack_pack_str_body(mp_pck, "resource",8);
     msgpack_pack_map(mp_pck, 2);
-    
+
     msgpack_pack_str(mp_pck,4);
     msgpack_pack_str_body(mp_pck, "type",4);
     msgpack_pack_str(mp_pck,13);
     msgpack_pack_str_body(mp_pck, "k8s_container",13);
 
-    /* Copy k8s_container entries as resource labels (skipping "lables" map) */
-    msgpack_pack_str(mp_pck,6);
-    msgpack_pack_str_body(mp_pck, "labels",6);
-    for (objcnt= 0, i = 0; i < k8s_map->via.map.size; i++) {
-        p = &k8s_map->via.map.ptr[i];
-        if (p->val.type != MSGPACK_OBJECT_MAP 
-            || flb_sds_cmp(ctx->k8s_labels_key, p->key.via.str.ptr, p->key.via.str.size) != 0) {
-            objcnt++;
-        }                
-    }    
-    msgpack_pack_map(mp_pck, objcnt); 
-    for (i = 0; i < k8s_map->via.map.size; i++) {
-        p = &k8s_map->via.map.ptr[i];
-        if (p->val.type != MSGPACK_OBJECT_MAP 
-            || flb_sds_cmp(ctx->k8s_labels_key, p->key.via.str.ptr, p->key.via.str.size) != 0) {
-            msgpack_pack_object(mp_pck, p->key);
-            msgpack_pack_object(mp_pck, p->val);
-        }                
-    }
-       
-    /* Copy k8s labels with "k8s-pod/" prefix */
     if (has_labels) {
+        msgpack_pack_str(mp_pck,6);
+        msgpack_pack_str_body(mp_pck, "labels",6);
+
+        if (get_msgpack_obj(&labels_map, NULL, NULL, ctx->k8s_project_id_key, MSGPACK_OBJECT_STR) == 0) {
+            has_project_id = 1;
+        }
+
+        msgpack_pack_map(mp_pck, k8s_map->via.map.size - 1 + 1 + (1 - has_project_id));
+
+        /* Add location <= ctx->zone */
+        msgpack_pack_str(mp_pck, 8);
+        msgpack_pack_str_body(mp_pck, "location", 8);
+        msgpack_pack_str(mp_pck, flb_sds_len(ctx->zone));
+        msgpack_pack_str_body(mp_pck, ctx->zone, flb_sds_len(ctx->zone));
+
+        /* Ensure project_id key exists. Add if missing. */
+        if (!has_project_id) {
+            msgpack_pack_str(mp_pck, 10);
+            msgpack_pack_str_body(mp_pck, "project_id", 10);
+            msgpack_pack_str(mp_pck, flb_sds_len(ctx->project_id));
+            msgpack_pack_str_body(mp_pck, ctx->project_id, flb_sds_len(ctx->project_id));
+        }
+
+        /* Copy k8s_container entries as resource labels (skipping "lables" map) */
+        for (i = 0; i < k8s_map->via.map.size; i++) {
+            p = &k8s_map->via.map.ptr[i];
+            if (i != k8s_labels_idx) {
+                msgpack_pack_object(mp_pck, p->key);
+                msgpack_pack_object(mp_pck, p->val);
+            }
+        }
+
+        /* Create root "labels" map. Copy k8s labels with "k8s-pod/" prefix */
         msgpack_pack_str(mp_pck,6);
         msgpack_pack_str_body(mp_pck, "labels",6);
         msgpack_pack_map(mp_pck, labels_map.via.map.size);
@@ -502,7 +522,7 @@ static void filter_k8s_resources(msgpack_packer *mp_pck, msgpack_object *obj,
             msgpack_pack_str(mp_pck, 8 + p->key.via.str.size);
             msgpack_pack_str_body(mp_pck, "k8s-pod/",8);
             msgpack_pack_str_body(mp_pck, p->key.via.str.ptr, p->key.via.str.size);
-            msgpack_pack_object(mp_pck, p->val);            
+            msgpack_pack_object(mp_pck, p->val);
         }
     }
 }
@@ -512,8 +532,10 @@ static int stackdriver_format(const void *data, size_t bytes,
                               char **out_data, size_t *out_size,
                               struct flb_stackdriver *ctx)
 {
+    int i;
     int len;
     int array_size = 0;
+    int k8s_map_idx = -1;
     size_t s;
     size_t off = 0;
     char path[PATH_MAX];
@@ -527,7 +549,7 @@ static int stackdriver_format(const void *data, size_t bytes,
     msgpack_unpacked result;
     msgpack_sbuffer mp_sbuf;
     msgpack_packer mp_pck;
-    flb_sds_t out_buf;    
+    flb_sds_t out_buf;
 
     /* Count number of records */
     msgpack_unpacked_init(&result);
@@ -607,10 +629,10 @@ static int stackdriver_format(const void *data, size_t bytes,
         flb_time_pop_from_msgpack(&tms, &result, &obj);
 
 
-        if (ctx->k8s_container_map 
-            && get_msgpack_obj(&k8s_map, obj, ctx->k8s_container_map, MSGPACK_OBJECT_MAP) == 0) {
-            filter_k8s_resources(&mp_pck, obj, ctx, &k8s_map);            
-        } 
+        if (ctx->k8s_container_map
+            && get_msgpack_obj(&k8s_map, &k8s_map_idx, obj, ctx->k8s_container_map, MSGPACK_OBJECT_MAP) == 0) {
+            filter_k8s_resources(&mp_pck, obj, ctx, &k8s_map);
+        }
         else {
             if (ctx->severity_key
                 && get_severity_level(&severity, obj, ctx->severity_key) == 0) {
@@ -625,19 +647,31 @@ static int stackdriver_format(const void *data, size_t bytes,
             }
         }
         /*
-         * Pack entry
+        * Pack entry
          *
          * {
          *  "logName": "...",
          *  "jsonPayload": {...},
          *  "timestamp": "..."
          * }
-         */            
+         */
 
         /* jsonPayload */
         msgpack_pack_str(&mp_pck, 11);
         msgpack_pack_str_body(&mp_pck, "jsonPayload", 11);
-        msgpack_pack_object(&mp_pck, *obj);
+        /* Copy all but $k8s_container key */
+        if (k8s_map_idx >= 0) {
+            msgpack_pack_map(&mp_pck, obj->via.map.size - 1);
+            for (i = 0; i < obj->via.map.size; i++) {
+                if (i != k8s_map_idx) {
+                    msgpack_pack_object(&mp_pck, obj->via.map.ptr[i].key);
+                    msgpack_pack_object(&mp_pck, obj->via.map.ptr[i].val);
+                }
+            }
+        } else
+        {
+            msgpack_pack_object(&mp_pck, *obj);
+        }
 
         /* logName */
         len = snprintf(path, sizeof(path) - 1,
