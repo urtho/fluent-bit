@@ -134,6 +134,7 @@ static int merge_log_handler(msgpack_object o,
             }
             return MERGE_PARSED;
         }
+        flb_trace("[filter_kube] Message failed to parse by %s", parser->name);
     }
     else if (ctx->merge_parser) { /* Custom parser 'merge_parser' option */
         ret = flb_parser_do(ctx->merge_parser,
@@ -155,6 +156,7 @@ static int merge_log_handler(msgpack_object o,
             flb_free(*out_buf);
             return MERGE_NONE;
         }
+        flb_trace("[filter_kube] Message failed to parse by default JSON %.*s", ctx->unesc_buf_len, ctx->unesc_buf);
     }
 
     if (ret == -1) {
